@@ -11,6 +11,7 @@ def test_health_reports_database_up(client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["db"] == "ok"
+    assert body["redis"] == "ok"
 
 
 def test_shorten_returns_201_and_link(client: TestClient) -> None:

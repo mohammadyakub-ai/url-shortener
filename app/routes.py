@@ -4,20 +4,25 @@ Fixed routes are declared before the catch-all ``GET /{code}`` so that words
 such as ``health`` and ``stats`` are never treated as short codes.
 """
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.ratelimit import rate_limit
 from app.schemas import HealthResponse, LinkResponse, ShortenRequest
 from app.services import CodeGenerationError, create_link, get_link, resolve_link
 
 router = APIRouter()
 
+DbSession = Annotated[Session, Depends(get_db)]
+
 
 @router.get("/health", response_model=HealthResponse)
-def health(request: Request, db: Session = Depends(get_db)) -> JSONResponse | HealthResponse:
+def health(request: Request, db: DbSession) -> JSONResponse | HealthResponse:
     """Report process, database and Redis reachability.
 
     Redis is optional for serving traffic, so it is reported as degraded rather
@@ -47,8 +52,13 @@ def health(request: Request, db: Session = Depends(get_db)) -> JSONResponse | He
     return HealthResponse(**payload)
 
 
-@router.post("/shorten", response_model=LinkResponse, status_code=201)
-def shorten(payload: ShortenRequest, db: Session = Depends(get_db)) -> LinkResponse:
+@router.post(
+    "/shorten",
+    response_model=LinkResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit)],
+)
+def shorten(payload: ShortenRequest, db: DbSession) -> LinkResponse:
     """Create a short link for a validated target URL."""
     try:
         url = create_link(db, payload.target_url)
@@ -58,7 +68,7 @@ def shorten(payload: ShortenRequest, db: Session = Depends(get_db)) -> LinkRespo
 
 
 @router.get("/stats/{code}", response_model=LinkResponse)
-def stats(code: str, db: Session = Depends(get_db)) -> LinkResponse:
+def stats(code: str, db: DbSession) -> LinkResponse:
     """Return metadata and aggregate clicks for a code."""
     url = get_link(db, code)
     if url is None:
@@ -67,13 +77,14 @@ def stats(code: str, db: Session = Depends(get_db)) -> LinkResponse:
 
 
 @router.get("/{code}")
-def redirect(code: str, db: Session = Depends(get_db)) -> RedirectResponse:
+def redirect(request: Request, code: str, db: DbSession) -> RedirectResponse:
     """Record a click and redirect to the target URL.
 
     307 preserves the HTTP method semantics; a short link is a permanent
     pointer, so browsers may cache it.
     """
-    target_url = resolve_link(db, code)
+    cache = getattr(request.app.state, "cache", None)
+    target_url = resolve_link(db, code, cache)
     if target_url is None:
         raise HTTPException(status_code=404, detail="Unknown short code")
     return RedirectResponse(url=target_url, status_code=307)

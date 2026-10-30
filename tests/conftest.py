@@ -7,12 +7,14 @@ real Postgres and Redis connections.
 
 from collections.abc import Generator
 
+import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.cache import LinkCache
 from app.config import Settings
 from app.database import Base, get_db
 from app.main import create_app
@@ -67,9 +69,16 @@ def db_session(session_factory: sessionmaker[Session]) -> Generator[Session, Non
         session.close()
 
 
-@pytest.fixture
-def app(settings: Settings, session_factory: sessionmaker[Session]):
+def build_app(settings: Settings, session_factory: sessionmaker[Session], redis_client):
+    """Wire an app to a test database and Redis-compatible client."""
     application = create_app(settings)
+    application.state.redis = redis_client
+    application.state.cache = LinkCache(
+        redis_client,
+        ttl_seconds=settings.cache_ttl_seconds,
+        negative_ttl_seconds=settings.negative_cache_ttl_seconds,
+        enabled=settings.cache_enabled,
+    )
 
     def override_get_db() -> Generator[Session, None, None]:
         session = session_factory()
@@ -80,6 +89,16 @@ def app(settings: Settings, session_factory: sessionmaker[Session]):
 
     application.dependency_overrides[get_db] = override_get_db
     return application
+
+
+@pytest.fixture
+def fake_redis():
+    return fakeredis.FakeRedis(decode_responses=True)
+
+
+@pytest.fixture
+def app(settings: Settings, session_factory: sessionmaker[Session], fake_redis):
+    return build_app(settings, session_factory, fake_redis)
 
 
 @pytest.fixture

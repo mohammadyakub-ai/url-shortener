@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.cache import CacheLookup, LinkCache
 from app.models import Url
 
 CODE_ALPHABET = string.ascii_letters + string.digits
@@ -75,10 +76,32 @@ def increment_clicks(db: Session, url_id: int) -> None:
     db.commit()
 
 
-def resolve_link(db: Session, code: str) -> str | None:
-    """Return the target URL for ``code`` and record a click, or None if unknown."""
+def resolve_link(db: Session, code: str, cache: LinkCache | None = None) -> str | None:
+    """Return the target URL for ``code`` and record a click, or None if unknown.
+
+    Cache hits skip the Postgres read but still perform the atomic click update
+    so statistics remain accurate. Unknown codes are cached briefly to protect
+    the database from 404 floods.
+    """
+    lookup = cache.get(code) if cache is not None else CacheLookup("disabled")
+
+    if lookup.status == "hit":
+        assert lookup.url_id is not None
+        increment_clicks(db, lookup.url_id)
+        return lookup.target_url
+    if lookup.status == "negative":
+        return None
+
     url = get_link(db, code)
     if url is None:
+        if lookup.status == "miss":
+            assert cache is not None
+            cache.set_negative(code)
         return None
+
+    if lookup.status == "miss":
+        assert cache is not None
+        cache.set_positive(code, url.id, url.target_url)
+
     increment_clicks(db, url.id)
     return url.target_url
