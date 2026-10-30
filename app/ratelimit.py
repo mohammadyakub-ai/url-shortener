@@ -11,6 +11,8 @@ import structlog
 from fastapi import HTTPException, Request
 from redis.exceptions import RedisError
 
+from app.metrics import RATE_LIMITED_REQUESTS_TOTAL
+
 logger = structlog.get_logger(__name__)
 
 
@@ -72,6 +74,7 @@ def rate_limit(request: Request) -> None:
             settings.rate_limit_window_seconds,
         )
     except RateLimitExceeded as exc:
+        RATE_LIMITED_REQUESTS_TOTAL.inc()
         raise HTTPException(
             status_code=429,
             detail="Rate limit exceeded",

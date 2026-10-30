@@ -6,8 +6,9 @@ such as ``health`` and ``stats`` are never treated as short codes.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -50,6 +51,12 @@ def health(request: Request, db: DbSession) -> JSONResponse | HealthResponse:
     if not db_ok:
         return JSONResponse(status_code=503, content=payload)
     return HealthResponse(**payload)
+
+
+@router.get("/metrics")
+def metrics() -> Response:
+    """Expose Prometheus metrics in the standard text exposition format."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.post(

@@ -7,6 +7,8 @@ from redis import Redis
 
 from app.cache import LinkCache
 from app.config import Settings, get_settings
+from app.logging_config import configure_logging
+from app.middleware import ObservabilityMiddleware
 from app.routes import router
 
 
@@ -29,6 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     without mutating process-wide state.
     """
     resolved = settings or get_settings()
+    configure_logging(resolved.log_level)
     app = FastAPI(
         title="Production-Style URL Shortener",
         version="0.1.0",
@@ -50,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled=resolved.cache_enabled,
     )
 
+    app.add_middleware(ObservabilityMiddleware)
     app.include_router(router)
     return app
 

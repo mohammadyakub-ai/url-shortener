@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.cache import CacheLookup, LinkCache
+from app.metrics import CACHE_REQUESTS_TOTAL, URLS_CREATED_TOTAL
 from app.models import Url
 
 CODE_ALPHABET = string.ascii_letters + string.digits
@@ -55,6 +56,7 @@ def create_link(db: Session, target_url: str) -> Url:
             db.rollback()
             continue
         db.refresh(url)
+        URLS_CREATED_TOTAL.inc()
         return url
     raise CodeGenerationError(
         f"failed to allocate a unique code after {MAX_CREATE_ATTEMPTS} attempts"
@@ -84,6 +86,13 @@ def resolve_link(db: Session, code: str, cache: LinkCache | None = None) -> str 
     the database from 404 floods.
     """
     lookup = cache.get(code) if cache is not None else CacheLookup("disabled")
+
+    if lookup.status in {"hit", "negative"}:
+        CACHE_REQUESTS_TOTAL.labels(result="hit").inc()
+    elif lookup.status == "miss":
+        CACHE_REQUESTS_TOTAL.labels(result="miss").inc()
+    elif lookup.status == "error":
+        CACHE_REQUESTS_TOTAL.labels(result="error").inc()
 
     if lookup.status == "hit":
         assert lookup.url_id is not None
