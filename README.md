@@ -1,187 +1,167 @@
-# Production-Style URL Shortener
+# URL Shortener
 
-A small URL shortener backend built to demonstrate production fundamentals
-rather than feature breadth: a clean FastAPI API, PostgreSQL as the system of
-record, Redis cache-aside and rate limiting, atomic click counting, structured
-JSON logs, Prometheus metrics, a multi-tier test suite with a coverage gate, CI,
-and a measured Locust load test.
+A production-style URL shortener built with FastAPI, PostgreSQL, and Redis.
 
-<!-- Replace OWNER/REPO with the GitHub repository once pushed. -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/mohammadyakub-ai/url-shortener/actions/workflows/ci.yml/badge.svg)](https://github.com/mohammadyakub-ai/url-shortener/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.162.0-009688)
+
+## Overview
+
+This service shortens URLs into random seven-character codes and resolves them
+with HTTP 307 redirects. PostgreSQL is the system of record; Redis provides
+cache-aside reads and fixed-window rate limiting for link creation. Each
+redirect increments the click count atomically, and structured logs, request
+IDs, and Prometheus metrics expose runtime behavior. The project runs locally
+with Docker Compose; it is not deployed.
+
+## Features
+
+- URL shortening with random base62 codes and collision retries
+- 307 redirects that preserve HTTP method semantics
+- Click statistics via an atomic PostgreSQL increment
+- Redis cache-aside with positive and negative TTLs
+- Fixed-window rate limiting on `POST /shorten`
+- Structured JSON logs with request IDs
+- Prometheus metrics with bounded route labels
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client --> API[FastAPI / Uvicorn]
-    API --> MW[Request ID + access log + metrics]
-    MW --> Routes
-    Routes -->|cache-aside| Redis[(Redis 7)]
-    Routes -->|SQL| PG[(PostgreSQL 16)]
-    Routes -->|/metrics| Prom[Prometheus]
+    Client[Client] -->|POST /shorten, GET /{code}| API[FastAPI]
+    API -->|cache lookup and rate-limit counters| Redis[(Redis)]
+    Redis -->|cache miss| API
+    API -->|links and atomic click updates| Postgres[(PostgreSQL)]
 ```
 
-A redirect reads `url:{code}` from Redis. On a hit it skips the Postgres
-`SELECT` but still performs the atomic `UPDATE clicks = clicks + 1`. On a miss
-it reads Postgres, caches the row, then redirects. Unknown codes are negatively
-cached for 60 seconds. Redis failures fall back to Postgres (fail open). See
-[docs/architecture.md](docs/architecture.md) for sequence diagrams.
+A redirect reads `url:{code}` from Redis. On a hit it skips the Postgres read but
+still updates the click count. On a miss it reads Postgres, caches the row, and
+redirects. Unknown codes are negatively cached for 60 seconds. Redis errors fall
+back to Postgres and fail open. See [docs/architecture.md](docs/architecture.md).
 
-## Quick start (Docker)
+## Quick start
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-The API is available at `http://localhost:8000`; the `api` container waits for
-healthy Postgres and Redis and runs `alembic upgrade head` before starting.
+The API is available at `http://localhost:8000`. The container waits for
+PostgreSQL and Redis health, applies Alembic migrations, then starts Uvicorn.
 
 ```bash
-curl -X POST http://localhost:8000/shorten \
+curl -s -X POST http://localhost:8000/shorten \
   -H 'Content-Type: application/json' \
   -d '{"target_url": "https://example.com/some/page"}'
 # {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z","target_url":"https://example.com/some/page","clicks":0}
 
-curl -i http://localhost:8000/Ab3xY9z      # 307 Location: https://example.com/some/page
-curl http://localhost:8000/stats/Ab3xY9z   # {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z",...}
-curl http://localhost:8000/metrics         # Prometheus text exposition
+curl -i http://localhost:8000/Ab3xY9z
+# HTTP/1.1 307 Temporary Redirect
+# location: https://example.com/some/page
 ```
 
-## Local development without Docker
+## API reference
 
-You still need PostgreSQL 16 and Redis 7 running locally; only the API process
-is run natively.
+| Method | Path | Description | Example response |
+|---|---|---|---|
+| GET | `/health` | Database and Redis health | `{"status":"ok","db":"ok","redis":"ok"}` |
+| GET | `/metrics` | Prometheus exposition | Prometheus text |
+| POST | `/shorten` | Create a link; 422 invalid URL, 429 rate limited | `201 {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z","target_url":"https://example.com","clicks":0}` |
+| GET | `/stats/{code}` | Link metadata and clicks; 404 unknown | `200 {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z","target_url":"https://example.com","clicks":1}` |
+| GET | `/{code}` | Record a click and redirect; 404 unknown | `307 Location: https://example.com` |
 
-```bash
-make install                 # creates .venv and installs pinned dev deps
-cp .env.example .env         # edit DATABASE_URL / REDIS_URL / BASE_URL if needed
-make migrate                 # alembic upgrade head
-make run                     # uvicorn on :8000
-```
-
-## API
-
-| Method | Path | Purpose | Success | Response | Errors |
-|---|---|---|---|---|---|
-| GET | `/health` | DB and Redis reachability | 200 | `status`, `db`, `redis` | 503 if DB is down |
-| GET | `/metrics` | Prometheus metrics | 200 | Prometheus text | — |
-| POST | `/shorten` | Create a short link | 201 | `code`, `short_url`, `target_url`, `clicks` | 422 invalid URL, 429 rate limited, 500 code exhaustion |
-| GET | `/stats/{code}` | Link metadata and click count | 200 | `code`, `short_url`, `target_url`, `clicks` | 404 unknown code |
-| GET | `/{code}` | Record a click and redirect | 307 | `Location` header | 404 unknown code |
-
-`short_url` is built as `BASE_URL` + `/` + `code`; the default base is
-`http://localhost:8000`.
-
-```bash
-curl http://localhost:8000/health
-curl -X POST http://localhost:8000/shorten -H 'Content-Type: application/json' \
-  -d '{"target_url": "https://example.com"}'
-curl http://localhost:8000/stats/<code>
-curl -i http://localhost:8000/<code>
-curl http://localhost:8000/metrics
-```
-
-Every response includes an `X-Request-ID` header (the inbound value is echoed,
-otherwise a UUID4 is generated), and every access log line carries the same ID.
+`short_url` is `BASE_URL` + `/` + `code`. Every response includes an
+`X-Request-ID` header; an inbound value is echoed, otherwise a UUID4 is generated.
 
 ## Configuration
 
-All settings come from environment variables; see `.env.example`. No secrets
-are committed.
-
-| Variable | Default | Meaning |
+| Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/urlshortener` | SQLAlchemy URL |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL used for cache and rate limits |
+| `DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/urlshortener` | SQLAlchemy connection URL |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL for cache and rate limits |
 | `BASE_URL` | `http://localhost:8000` | Public base used to build `short_url` |
-| `CACHE_ENABLED` | `true` | Disable redirect caching entirely |
+| `CACHE_ENABLED` | `true` | Enable redirect caching |
 | `CACHE_TTL_SECONDS` | `3600` | Positive cache TTL |
 | `NEGATIVE_CACHE_TTL_SECONDS` | `60` | Unknown-code cache TTL |
-| `RATE_LIMIT_REQUESTS` | `20` | Fixed-window budget per client IP; `0` disables limiting |
+| `RATE_LIMIT_REQUESTS` | `20` | Requests per IP per window; `0` disables limiting |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Fixed-window length |
-| `LOG_LEVEL` | `INFO` | Python/structlog level |
+| `LOG_LEVEL` | `INFO` | Python and structlog level |
+| `API_PORT` | `8000` | Compose host port for the API |
+| `POSTGRES_PORT` | `5432` | Compose host port for PostgreSQL |
+| `REDIS_PORT` | `6379` | Compose host port for Redis |
+| `POSTGRES_USER` | `postgres` | Compose database user |
+| `POSTGRES_PASSWORD` | `postgres` | Compose database password |
+| `POSTGRES_DB` | `urlshortener` | Compose database name |
 
-`RATE_LIMIT_REQUESTS=0` is the supported way to disable throttling for load
-tests. The limiter uses the first `X-Forwarded-For` hop when present, otherwise
-the socket address.
+The rate limiter uses the first `X-Forwarded-For` hop when present, otherwise the
+socket address. No `.env` file or secret is tracked.
 
-## Tests
+## Testing
 
 ```bash
-make test              # unit + functional (SQLite + fakeredis); integration excluded
-make cov               # same, with coverage and the 85% gate
-make test-integration  # real Postgres + Redis via docker compose
-make lint              # ruff check + format check
+make test              # unit + functional: SQLite + fakeredis
+make cov               # unit + functional with the 85% coverage gate
+make test-integration  # real PostgreSQL + Redis via Docker Compose
+make lint              # ruff check and format check
 ```
 
-- **Unit** (`tests/unit`): code generation, collision retries, cache helpers
-  with `fakeredis`, fixed-window limiter, client-IP extraction.
-- **Functional** (`tests/functional`): all endpoints through `TestClient`, cache
-  hit/miss/negative/disabled, fail-open for cache and limiter, metrics, JSON
-  logs and request IDs.
-- **Integration** (`tests/integration`, marked `integration`): Alembic migration
-  against an empty database, end-to-end create/redirect/stats, unique-constraint
-  collisions, and a 50-way concurrent redirect asserting exactly 50 clicks.
+Unit tests cover code generation, cache helpers, and the rate limiter.
+Functional tests exercise every endpoint through `TestClient`. Integration tests
+run migrations against an empty PostgreSQL database and cover create/redirect/
+stats, collisions, and 50 concurrent redirects.
 
-## Results (measured)
+## Results
 
-Last local run on the machine described in [docs/load-test.md](docs/load-test.md):
+Current local results:
 
-| Metric | Value |
+| Metric | Result |
 |---|---|
 | Unit + functional tests | 56 passed (7 integration deselected) |
 | Integration tests | 7 passed |
-| Line coverage | 94% (`pytest --cov=app`, gate 85%) |
+| Coverage | 94.39% total, branch coverage enabled (gate 85%) |
 | Lint | `ruff check` and `ruff format --check` clean |
 
-Load test, 100 users, 10 users/s ramp, 60 s, 90% redirects / 10% creates:
+Load test, 100 users, 10 users/s ramp, 60 seconds, 90% redirects / 10% creates:
 
 | Run | Requests/sec | Median | p95 | p99 | Failure rate |
 |---|---:|---:|---:|---:|---:|
 | Cache enabled | 191.82 | 170 ms | 330 ms | 420 ms | 0.00% |
 | Cache disabled | 170.26 | 230 ms | 420 ms | 520 ms | 0.00% |
 
-The cache improved throughput by about 13% in this run and lowered median and
-tail latency, though every redirect still writes the click count to Postgres.
-These are single-host, one-run-per-variant numbers, so treat them as directional.
-Full commands, hardware details and interpretation are in
-[docs/load-test.md](docs/load-test.md).
+Totals: 11,490 requests with cache enabled and 10,189 without; zero failures.
+Conditions: PostgreSQL 16.2 and Redis 6.0.16, API and Locust on the same
+16-logical-CPU local machine, rate limiting disabled. Docker pins Redis 7; the
+load test used the locally available Redis 6.0.16. These are single-host,
+one-run-per-variant numbers, so treat them as directional rather than capacity
+planning. Full commands and interpretation are in [docs/load-test.md](docs/load-test.md).
 
-## Design decisions and trade-offs
+## Design decisions and limitations
 
-- **307 redirect** preserves method semantics and treats links as permanent.
-- **Atomic SQL increment** (`clicks = clicks + 1`) avoids lost updates; verified
-  by the 50-way concurrency test. The cost is one write per redirect.
-- **Cache-aside** on read with a 1-hour positive TTL and 60-second negative TTL.
-- **Fixed-window rate limiting** is two Redis commands; its known weakness is a
-  burst of up to 2x the limit across a window boundary.
-- **Fail open** on Redis errors: availability over strict throttling/caching.
-- **Random 7-char base62 codes** from `secrets.choice`: ~3.5 trillion keyspace,
-  unguessable, with unique-constraint retries on collision.
-- **Bounded metric cardinality** by labelling HTTP metrics with the route
-  template, never the raw path.
+- **Atomic SQL click counter.** `clicks = clicks + 1` avoids lost updates, but
+  every redirect still performs one PostgreSQL write.
+- **Fail-open Redis.** Cache and rate-limiter errors fall back to the database
+  and allow requests, favoring availability over strict throttling.
+- **Fixed-window rate limiter.** It uses two Redis commands and can allow up to
+  2x the configured limit across a window boundary.
+- **Cache-aside reads.** Positive entries live for one hour and negative entries
+  for 60 seconds; a cache hit still writes the click count to Postgres.
+- **No deployment setup.** The repository runs locally with Docker Compose and
+  includes no cloud infrastructure.
+- **Not implemented:** authentication, custom aliases, link expiry, deletion,
+  and batched click writes. The per-redirect write is the next scalability
+  bottleneck; batching is discussed in [docs/decisions.md](docs/decisions.md).
 
-Full rationale, including the per-redirect write limitation and how to batch
-click counts in Redis, is in [docs/decisions.md](docs/decisions.md).
-
-## Repository layout
+## Project structure
 
 ```
-app/            FastAPI app, services, cache, rate limiter, observability
-migrations/     Alembic environment and 0001_create_urls
-tests/          unit, functional, integration
+app/            FastAPI routes, services, cache, limiter, logging, metrics
+migrations/     Alembic environment and the urls migration
+tests/          unit, functional, and integration tests
 load/           Locust workload
-docs/           architecture, decisions, load-test results
-.github/        CI workflow (lint, test, integration, docker build)
+docs/           architecture, decisions, and load-test details
+.github/        GitHub Actions CI workflow
+docker-compose.yml
+Dockerfile
+Makefile
 ```
-
-## Notes on verification
-
-- Unit, functional and integration suites were executed locally; the numbers
-  above come from those runs.
-- The load test used local PostgreSQL 16.2 and Redis 6.0.16 (the project's
-  Docker image pins Redis 7) with API and Locust on the same host.
-- The Docker image build and `docker compose up --build` were exercised locally;
-  the GitHub Actions workflow has not been run against a remote repository in
-  this environment, so CI is not claimed to be green.
