@@ -47,7 +47,7 @@ def postgres_url() -> str:
         pytest.skip(f"PostgreSQL unavailable: {exc}")
     finally:
         admin.dispose()
-    return str(url)
+    return url.render_as_string(hide_password=False)
 
 
 @pytest.fixture(scope="session")
