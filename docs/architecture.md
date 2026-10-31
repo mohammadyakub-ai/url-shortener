@@ -72,7 +72,7 @@ flowchart TD
     C -->|allowed| D[Generate 7-char base62 code]
     D --> E[INSERT urls]
     E -->|unique constraint violated| D
-    E -->|success| F[201 code, target_url, clicks]
+    E -->|success| F[201 code, short_url, target_url, clicks]
     E -->|5 collisions| G[500]
 ```
 

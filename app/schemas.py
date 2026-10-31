@@ -7,7 +7,7 @@ to explain: http/https scheme, a host, no whitespace, at most 2048 characters.
 
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ShortenRequest(BaseModel):
@@ -31,9 +31,8 @@ class ShortenRequest(BaseModel):
 class LinkResponse(BaseModel):
     """Representation of a shortened link returned by the API."""
 
-    model_config = ConfigDict(from_attributes=True)
-
     code: str
+    short_url: str
     target_url: str
     clicks: int
 

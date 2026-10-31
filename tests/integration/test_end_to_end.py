@@ -29,10 +29,13 @@ def test_create_redirect_and_stats_round_trip(client: TestClient, redis_client) 
     redirect = client.get(f"/{created['code']}", follow_redirects=False)
     stats = client.get(f"/stats/{created['code']}")
 
+    expected_short_url = f"http://localhost:8000/{created['code']}"
+    assert created["short_url"] == expected_short_url
     assert redirect.status_code == 307
     assert redirect.headers["location"] == "https://example.com/integration"
     assert stats.status_code == 200
     assert stats.json()["clicks"] == 1
+    assert stats.json()["short_url"] == expected_short_url
     assert redis_client.exists(f"url:{created['code']}") == 1
 
 

@@ -41,10 +41,10 @@ healthy Postgres and Redis and runs `alembic upgrade head` before starting.
 curl -X POST http://localhost:8000/shorten \
   -H 'Content-Type: application/json' \
   -d '{"target_url": "https://example.com/some/page"}'
-# {"code":"Ab3xY9z","target_url":"https://example.com/some/page","clicks":0}
+# {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z","target_url":"https://example.com/some/page","clicks":0}
 
 curl -i http://localhost:8000/Ab3xY9z      # 307 Location: https://example.com/some/page
-curl http://localhost:8000/stats/Ab3xY9z   # {"code":...,"target_url":...,"clicks":1}
+curl http://localhost:8000/stats/Ab3xY9z   # {"code":"Ab3xY9z","short_url":"http://localhost:8000/Ab3xY9z",...}
 curl http://localhost:8000/metrics         # Prometheus text exposition
 ```
 
@@ -55,20 +55,23 @@ is run natively.
 
 ```bash
 make install                 # creates .venv and installs pinned dev deps
-cp .env.example .env         # edit DATABASE_URL / REDIS_URL if needed
+cp .env.example .env         # edit DATABASE_URL / REDIS_URL / BASE_URL if needed
 make migrate                 # alembic upgrade head
 make run                     # uvicorn on :8000
 ```
 
 ## API
 
-| Method | Path | Purpose | Success | Errors |
-|---|---|---|---|---|
-| GET | `/health` | DB and Redis reachability | 200 | 503 if DB is down |
-| GET | `/metrics` | Prometheus metrics | 200 | — |
-| POST | `/shorten` | Create a short link | 201 | 422 invalid URL, 429 rate limited, 500 code exhaustion |
-| GET | `/stats/{code}` | Link metadata and click count | 200 | 404 unknown code |
-| GET | `/{code}` | Record a click and redirect | 307 | 404 unknown code |
+| Method | Path | Purpose | Success | Response | Errors |
+|---|---|---|---|---|---|
+| GET | `/health` | DB and Redis reachability | 200 | `status`, `db`, `redis` | 503 if DB is down |
+| GET | `/metrics` | Prometheus metrics | 200 | Prometheus text | — |
+| POST | `/shorten` | Create a short link | 201 | `code`, `short_url`, `target_url`, `clicks` | 422 invalid URL, 429 rate limited, 500 code exhaustion |
+| GET | `/stats/{code}` | Link metadata and click count | 200 | `code`, `short_url`, `target_url`, `clicks` | 404 unknown code |
+| GET | `/{code}` | Record a click and redirect | 307 | `Location` header | 404 unknown code |
+
+`short_url` is built as `BASE_URL` + `/` + `code`; the default base is
+`http://localhost:8000`.
 
 ```bash
 curl http://localhost:8000/health
@@ -91,6 +94,7 @@ are committed.
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/urlshortener` | SQLAlchemy URL |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL used for cache and rate limits |
+| `BASE_URL` | `http://localhost:8000` | Public base used to build `short_url` |
 | `CACHE_ENABLED` | `true` | Disable redirect caching entirely |
 | `CACHE_TTL_SECONDS` | `3600` | Positive cache TTL |
 | `NEGATIVE_CACHE_TTL_SECONDS` | `60` | Unknown-code cache TTL |
@@ -126,7 +130,7 @@ Last local run on the machine described in [docs/load-test.md](docs/load-test.md
 
 | Metric | Value |
 |---|---|
-| Unit + functional tests | 55 passed (7 integration deselected) |
+| Unit + functional tests | 56 passed (7 integration deselected) |
 | Integration tests | 7 passed |
 | Line coverage | 94% (`pytest --cov=app`, gate 85%) |
 | Lint | `ruff check` and `ruff format --check` clean |
@@ -135,12 +139,13 @@ Load test, 100 users, 10 users/s ramp, 60 s, 90% redirects / 10% creates:
 
 | Run | Requests/sec | Median | p95 | p99 | Failure rate |
 |---|---:|---:|---:|---:|---:|
-| Cache enabled | 239.28 | 58 ms | 220 ms | 320 ms | 0.00% |
-| Cache disabled | 246.26 | 44 ms | 220 ms | 320 ms | 0.00% |
+| Cache enabled | 191.82 | 170 ms | 330 ms | 420 ms | 0.00% |
+| Cache disabled | 170.26 | 230 ms | 420 ms | 520 ms | 0.00% |
 
-The cache did not improve throughput in this environment because every redirect
-still writes the click count to Postgres; the Redis hop replaces a cheap indexed
-`SELECT`. Full commands, hardware details and interpretation are in
+The cache improved throughput by about 13% in this run and lowered median and
+tail latency, though every redirect still writes the click count to Postgres.
+These are single-host, one-run-per-variant numbers, so treat them as directional.
+Full commands, hardware details and interpretation are in
 [docs/load-test.md](docs/load-test.md).
 
 ## Design decisions and trade-offs
@@ -177,6 +182,6 @@ docs/           architecture, decisions, load-test results
   above come from those runs.
 - The load test used local PostgreSQL 16.2 and Redis 6.0.16 (the project's
   Docker image pins Redis 7) with API and Locust on the same host.
-- The Docker image build and `docker compose up --build` are exercised by the CI
-  `docker-build` job; a Docker daemon was not available in the local
-  development environment used to write this repository.
+- The Docker image build and `docker compose up --build` were exercised locally;
+  the GitHub Actions workflow has not been run against a remote repository in
+  this environment, so CI is not claimed to be green.

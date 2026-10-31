@@ -63,23 +63,25 @@ Aggregated across both endpoint tasks for each 60-second run:
 
 | Run | Requests/sec | Median | p95 | p99 | Failure rate |
 |---|---:|---:|---:|---:|---:|
-| Cache enabled | 239.28 | 58 ms | 220 ms | 320 ms | 0.00% |
-| Cache disabled | 246.26 | 44 ms | 220 ms | 320 ms | 0.00% |
+| Cache enabled | 191.82 | 170 ms | 330 ms | 420 ms | 0.00% |
+| Cache disabled | 170.26 | 230 ms | 420 ms | 520 ms | 0.00% |
 
-Totals: 14,205 requests with cache enabled and 14,752 with cache disabled; zero
+Totals: 11,490 requests with cache enabled and 10,189 with cache disabled; zero
 failures in both runs.
 
 ## Interpretation
 
-Caching did not improve throughput in this run; it was slightly slower
-(239 vs 246 req/s) with a higher median (58 vs 44 ms). This is consistent with
-the design: every redirect still performs the atomic PostgreSQL click update, so
-the cache only removes a cheap indexed `SELECT` while adding a Redis round-trip.
-With a small, fully cached working set on local Postgres, that trade is roughly
-neutral to negative.
+Caching improved throughput in this run: 191.82 vs 170.26 req/s (about 13%),
+with lower median (170 vs 230 ms), p95 (330 vs 420 ms) and p99 (420 vs 520 ms)
+latency. That matches the design: the cache removes an indexed `SELECT` from the
+redirect path, at the cost of a Redis round-trip, while the atomic PostgreSQL
+click update still happens on every redirect.
 
-The cache should matter more when the database is under read contention, on a
-larger table, or across a network hop. The real scalability win for this
-workload is batching click counts in Redis instead of writing on every redirect
-(see `docs/decisions.md`). The identical p95/p99 figures across runs are
-dominated by `POST /shorten` latency, not the redirect path.
+The tail is dominated by `POST /shorten` in both runs (p99 500 ms with the cache
+enabled and 610 ms without, versus 290 ms and 360 ms for redirects). These are
+single-host runs with one run per variant, so the comparison is directional, not
+a capacity benchmark. The cache should matter more when the database is under
+read contention, on a larger table, or across a network hop.
+
+The real scalability win for this workload is batching click counts in Redis
+instead of writing on every redirect (see `docs/decisions.md`).

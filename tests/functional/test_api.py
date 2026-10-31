@@ -20,6 +20,7 @@ def test_shorten_returns_201_and_link(client: TestClient) -> None:
     assert response.status_code == 201
     body = response.json()
     assert body["target_url"] == "https://example.com/page"
+    assert body["short_url"] == f"http://localhost:8000/{body['code']}"
     assert body["clicks"] == 0
     assert len(body["code"]) == 7
 
@@ -61,8 +62,19 @@ def test_stats_returns_link_and_404_for_unknown(client: TestClient) -> None:
     response = client.get(f"/stats/{created['code']}")
     assert response.status_code == 200
     assert response.json()["target_url"] == "https://example.com/stats"
+    assert response.json()["short_url"] == f"http://localhost:8000/{created['code']}"
 
     assert client.get("/stats/unknown").status_code == 404
+
+
+def test_short_url_uses_configured_base_url(app, client: TestClient) -> None:
+    app.state.settings.base_url = "https://sho.rt/"
+
+    created = client.post("/shorten", json={"target_url": "https://example.com/base"}).json()
+    expected = f"https://sho.rt/{created['code']}"
+
+    assert created["short_url"] == expected
+    assert client.get(f"/stats/{created['code']}").json()["short_url"] == expected
 
 
 def test_clicks_increment_across_redirects(client: TestClient) -> None:

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/urlshortener"
     redis_url: str = "redis://localhost:6379/0"
+    base_url: str = Field(default="http://localhost:8000", min_length=1)
 
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=3600, ge=1)

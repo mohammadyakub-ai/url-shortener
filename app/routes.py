@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models import Url
 from app.ratelimit import rate_limit
 from app.schemas import HealthResponse, LinkResponse, ShortenRequest
 from app.services import CodeGenerationError, create_link, get_link, resolve_link
@@ -20,6 +21,16 @@ from app.services import CodeGenerationError, create_link, get_link, resolve_lin
 router = APIRouter()
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+def _link_response(url: Url, base_url: str) -> LinkResponse:
+    """Serialize a link, deriving its public short URL from the configured base."""
+    return LinkResponse(
+        code=url.code,
+        short_url=f"{base_url.rstrip('/')}/{url.code}",
+        target_url=url.target_url,
+        clicks=url.clicks,
+    )
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -65,22 +76,22 @@ def metrics() -> Response:
     status_code=201,
     dependencies=[Depends(rate_limit)],
 )
-def shorten(payload: ShortenRequest, db: DbSession) -> LinkResponse:
+def shorten(request: Request, payload: ShortenRequest, db: DbSession) -> LinkResponse:
     """Create a short link for a validated target URL."""
     try:
         url = create_link(db, payload.target_url)
     except CodeGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return LinkResponse.model_validate(url)
+    return _link_response(url, request.app.state.settings.base_url)
 
 
 @router.get("/stats/{code}", response_model=LinkResponse)
-def stats(code: str, db: DbSession) -> LinkResponse:
+def stats(request: Request, code: str, db: DbSession) -> LinkResponse:
     """Return metadata and aggregate clicks for a code."""
     url = get_link(db, code)
     if url is None:
         raise HTTPException(status_code=404, detail="Unknown short code")
-    return LinkResponse.model_validate(url)
+    return _link_response(url, request.app.state.settings.base_url)
 
 
 @router.get("/{code}")
